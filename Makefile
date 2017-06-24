@@ -1,7 +1,7 @@
 .PHONY: all clean
 
 CC := gcc
-CFLAGS := -Wall -O3  -Wmissing-prototypes -Wstrict-prototypes -Werror=implicit-function-declaration -Werror=format -mtune=native
+CFLAGS := -Wall -O3  -Wmissing-prototypes -Wstrict-prototypes -Werror=implicit-function-declaration -Werror=format -mtune=native -D_GNU_SOURCE
 LDFLAGS :=
 
 OBJS := fast_crc32.o

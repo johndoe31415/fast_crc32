@@ -23,9 +23,12 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/sendfile.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 static void print_crc32(const char *path);
 
+static bool calc_blockdev_crc;
 static int kernel_crc32_socket;
 
 static int initialize_kernel_crc32(uint32_t seed) {
@@ -56,7 +59,6 @@ static int initialize_kernel_crc32(uint32_t seed) {
 	return sd;
 }
 
-
 static bool calculate_kernel_crc32(int fd, size_t filesize, uint32_t *crc) {
 	int sd;
     if ((sd = accept(kernel_crc32_socket, NULL, 0)) == -1) {
@@ -64,18 +66,38 @@ static bool calculate_kernel_crc32(int fd, size_t filesize, uint32_t *crc) {
 		return false;
 	}
 
+	int pipefd[2];
+	if (pipe(pipefd) == -1) {
+		perror("pipe");
+		close(sd);
+		return false;
+	}
+
 	size_t remaining = filesize;
 	while (remaining > 0) {
-		ssize_t written = sendfile(sd, fd, NULL, remaining);
-		if (written == -1) {
-			fprintf(stderr, "sendfile wrote %zd (expected %zu): %s\n", written, remaining, strerror(errno));
+		ssize_t into_pipe = splice(fd, NULL, pipefd[1], NULL, remaining, SPLICE_F_MORE);
+		if (into_pipe < 0) {
+			fprintf(stderr, "splice1 wrote %zd (expected %zu): %s\n", into_pipe, remaining, strerror(errno));
+			close(pipefd[0]);
+			close(pipefd[1]);
+			close(sd);
+			return false;
+		}
+		ssize_t written = splice(pipefd[0], NULL, sd, NULL, into_pipe, SPLICE_F_MORE);
+		if (written < 0) {
+			fprintf(stderr, "splice2 wrote %zd (expected %zu): %s\n", written, remaining, strerror(errno));
+			close(pipefd[0]);
+			close(pipefd[1]);
 			close(sd);
 			return false;
 		}
 		remaining -= written;
 	}
 
-    if (read(sd, crc, 4) != 4) {
+	close(pipefd[0]);
+	close(pipefd[1]);
+
+	if (read(sd, crc, 4) != 4) {
 		perror("read");
 		close(sd);
 		return false;
@@ -91,7 +113,7 @@ static void print_crc32_file(const char *filename, size_t filesize) {
 		fprintf(stderr, "open %s: %s\n", filename, strerror(errno));
 		return;
 	}
-	uint32_t crc;
+	uint32_t crc = 0;
 	if (!calculate_kernel_crc32(fd, filesize, &crc)) {
 		fprintf(stderr, "calculate_crc32 failed for %s\n", filename);
 	} else {
@@ -128,8 +150,25 @@ static void print_crc32(const char *path) {
 		fprintf(stderr, "stat %s: %s\n", path, strerror(errno));
 		return;
 	}
-	if (S_ISREG(statbuf.st_mode)) {
-		print_crc32_file(path, statbuf.st_size);
+	if (S_ISREG(statbuf.st_mode) || (calc_blockdev_crc && S_ISBLK(statbuf.st_mode))) {
+		size_t filesize = 0;
+		if (S_ISREG(statbuf.st_mode)) {
+			filesize = statbuf.st_size;
+		} else {
+			int fd = open(path, O_RDONLY);
+			if (fd == -1) {
+				perror("open");
+				return;
+			}
+			filesize = lseek(fd, 0, SEEK_END);
+			if (filesize == (off_t)-1) {
+				perror("lseek");
+				close(fd);
+				return;
+			}
+			close(fd);
+		}
+		print_crc32_file(path, filesize);
 	} else if (S_ISDIR(statbuf.st_mode)) {
 		print_crc32_dir(path);
 	}
@@ -137,14 +176,21 @@ static void print_crc32(const char *path) {
 
 int main(int argc, char **argv) {
 	if (argc < 2) {
-		fprintf(stderr, "%s [path] ([path] ...)\n", argv[0]);
+		fprintf(stderr, "%s (-d) [path] ([path] ...)\n", argv[0]);
+		fprintf(stderr, "   -d     Also print the hash value of block device contents.\n");
 		exit(EXIT_FAILURE);
+	}
+	int positional_index = 1;
+	if (!strcmp(argv[positional_index], "-d")) {
+		calc_blockdev_crc = true;
+		positional_index++;
+		fprintf(stderr, "Will also calculate CRC of block devices.\n");
 	}
 	kernel_crc32_socket = initialize_kernel_crc32(~0);
 	if (kernel_crc32_socket == -1) {
 		exit(EXIT_FAILURE);
 	}
-	for (int i = 1; i < argc; i++) {
+	for (int i = positional_index; i < argc; i++) {
 		print_crc32(argv[i]);
 	}
 	close(kernel_crc32_socket);
