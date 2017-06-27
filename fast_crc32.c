@@ -25,6 +25,7 @@
 #include <sys/sendfile.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <bits/socket.h>
 
 static void print_crc32(const char *path);
 
